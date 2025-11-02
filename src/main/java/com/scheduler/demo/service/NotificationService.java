@@ -5,6 +5,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.scheduler.demo.dto.CreateNotificationRequest;
 import com.scheduler.demo.model.NotificationJob;
 import com.scheduler.demo.repository.NotificationJobRepository;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -12,6 +13,7 @@ import java.time.LocalDateTime;
 import java.util.*;
 
 @Service
+@Slf4j
 public class NotificationService {
 
     private final NotificationJobRepository jobRepo;
@@ -67,6 +69,8 @@ public class NotificationService {
 
     @Transactional
     public void processJob(NotificationJob job) {
+        log.info("📧 Processing job ID={}, type={}, template={}", job.getId(), job.getType(), job.getTemplateKey());
+
         // Set to SENDING
         job.setStatus("SENDING");
         job.setUpdatedAt(LocalDateTime.now());
@@ -75,15 +79,19 @@ public class NotificationService {
         // load template
         Optional<String> t = templateService.getTemplateContent(job.getTemplateKey());
         String content = t.orElse("Hi, this is notification for template " + job.getTemplateKey());
+        log.debug("Template content: {}", content);
 
         // parse payload JSON to Map
         Map<String, Object> payloadMap = new HashMap<>();
         try {
             payloadMap = mapper.readValue(job.getPayload(), Map.class);
-        } catch (Exception ignored) {}
+        } catch (Exception e) {
+            log.warn("Failed to parse payload JSON: {}", e.getMessage());
+        }
 
         // simple placeholder replacement
         String finalContent = render(content, payloadMap);
+        log.debug("Final content after rendering: {}", finalContent);
 
         boolean success = false;
         try {
@@ -93,12 +101,16 @@ public class NotificationService {
                 case "PUSH" -> sender.sendPush(job , finalContent);
                 default -> sender.sendEmail(job , finalContent);
             };
-        } catch (Exception ignored) {
+            log.info("✅ Notification sent successfully for job ID={}", job.getId());
+        } catch (Exception e) {
+            log.error("❌ Failed to send notification for job ID={}: {}", job.getId(), e.getMessage(), e);
+            success = false;
         }
 
         job.setStatus(success ? "COMPLETED" : "FAILED");
         job.setUpdatedAt(LocalDateTime.now());
         jobRepo.save(job);
+        log.info("Job ID={} marked as {}", job.getId(), job.getStatus());
     }
 
     private String render(String template, Map<String, Object> data) {

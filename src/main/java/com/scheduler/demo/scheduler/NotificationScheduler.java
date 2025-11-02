@@ -42,15 +42,16 @@ public class NotificationScheduler {
             // submit async
             CompletableFuture.runAsync(() -> {
                 try {
+                    log.info("Processing job ID={}, type={}, user={}", job.getId(), job.getType(), job.getUserName());
                     notificationService.processJob(job);
                 } catch (Exception ex) {
                     // log and mark failed
+                    log.error("❌ Failed to process job ID={}: {}", job.getId(), ex.getMessage(), ex);
                     job.setStatus("FAILED");
                     job.setUpdatedAt(LocalDateTime.now());
                     job.setRecipientEmail(job.getRecipientEmail());
                     job.setUserName(job.getUserName());
                     jobRepository.save(job);
-                    ex.printStackTrace();
                 }
             }, notificationExecutor);
         }

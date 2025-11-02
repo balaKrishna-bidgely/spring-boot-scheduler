@@ -58,12 +58,26 @@ jobs:
       - name: Wait for application to start
         run: |
           echo "Waiting for application to be ready..."
+          echo ""
           for i in {1..30}; do
             if curl -f http://localhost:8080/actuator/health 2>/dev/null || curl -f http://localhost:8080 2>/dev/null; then
+              echo ""
               echo "Application is ready!"
+              echo ""
+              echo "=========================================="
+              echo "📋 STARTUP LOGS (Last 50 lines):"
+              echo "=========================================="
+              tail -n 50 app.log
+              echo "=========================================="
               break
             fi
             echo "Attempt $i: Application not ready yet, waiting..."
+            if [ $i -eq 15 ] || [ $i -eq 30 ]; then
+              echo ""
+              echo "Current application logs:"
+              tail -n 20 app.log
+              echo ""
+            fi
             sleep 5
           done
 
@@ -226,20 +240,30 @@ jobs:
           echo "Running application for $DURATION_MINUTES minutes ($DURATION_SECONDS seconds)..."
           echo ""
           echo "🌐 Your application is now accessible at: ${{ env.TUNNEL_URL }}"
-          echo "📊 Monitor requests in real-time in the logs below"
+          echo ""
+          echo "=========================================="
+          echo "📋 SPRING BOOT APPLICATION LOGS"
+          echo "=========================================="
           echo ""
 
           # Monitor the application while it runs
           END_TIME=$(($(date +%s) + DURATION_SECONDS))
+          LAST_LOG_LINE=0
+
           while [ $(date +%s) -lt $END_TIME ]; do
             REMAINING=$((END_TIME - $(date +%s)))
             REMAINING_MINUTES=$((REMAINING / 60))
             REMAINING_SECONDS=$((REMAINING % 60))
-            echo "⏱️  Application running... Time remaining: ${REMAINING_MINUTES}m ${REMAINING_SECONDS}s | Public URL: ${{ env.TUNNEL_URL }}"
 
             # Check if app is still alive
             if ! ps -p $APP_PID > /dev/null; then
+              echo ""
               echo "❌ ERROR: Application process died!"
+              echo ""
+              echo "=========================================="
+              echo "📋 LAST 100 LINES OF APPLICATION LOG:"
+              echo "=========================================="
+              tail -n 100 app.log
               exit 1
             fi
 
@@ -258,20 +282,65 @@ jobs:
               echo "TUNNEL_PID=$TUNNEL_PID" >> $GITHUB_ENV
             fi
 
+            # Display status and new logs
+            echo ""
+            echo "=========================================="
+            echo "⏱️  Time remaining: ${REMAINING_MINUTES}m ${REMAINING_SECONDS}s"
+            echo "🌐 Public URL: ${{ env.TUNNEL_URL }}"
+            echo "=========================================="
+
+            # Show NEW log lines since last check
+            if [ -f app.log ]; then
+              CURRENT_LINES=$(wc -l < app.log 2>/dev/null || echo "0")
+              if [ $CURRENT_LINES -gt $LAST_LOG_LINE ]; then
+                NEW_LINES=$((CURRENT_LINES - LAST_LOG_LINE))
+                echo "📋 New application logs (last $NEW_LINES lines):"
+                echo "------------------------------------------"
+                tail -n $NEW_LINES app.log
+                echo "------------------------------------------"
+                LAST_LOG_LINE=$CURRENT_LINES
+              else
+                echo "📋 No new logs in the last minute"
+                echo "(Application is idle or logs are not being written)"
+              fi
+            else
+              echo "⚠️  app.log file not found"
+            fi
+            echo ""
+
             # Sleep for 1 minute between status updates
             sleep 60
           done
 
           echo "✅ Duration completed!"
 
-      - name: Fetch application logs
+      - name: Show final application logs
         if: always()
         run: |
-          echo "==================================="
-          echo "Application Logs:"
-          echo "==================================="
-          # If you're logging to a file, cat it here
-          # cat logs/application.log || echo "No log file found"
+          echo ""
+          echo "=========================================="
+          echo "📋 FINAL APPLICATION LOGS (Last 200 lines)"
+          echo "=========================================="
+          if [ -f app.log ]; then
+            tail -n 200 app.log
+          else
+            echo "No application logs found"
+          fi
+          echo "=========================================="
+          echo ""
+          echo "📊 Log Statistics:"
+          if [ -f app.log ]; then
+            echo "Total log lines: $(wc -l < app.log)"
+            echo "Log file size: $(du -h app.log | cut -f1)"
+            echo ""
+            echo "Error count: $(grep -i "error" app.log | wc -l)"
+            echo "Warning count: $(grep -i "warn" app.log | wc -l)"
+            echo "Exception count: $(grep -i "exception" app.log | wc -l)"
+            echo ""
+            echo "Recent errors (if any):"
+            grep -i "error\|exception" app.log | tail -n 10 || echo "No errors found"
+          fi
+          echo "=========================================="
 
       - name: Stop tunnel
         if: always()
