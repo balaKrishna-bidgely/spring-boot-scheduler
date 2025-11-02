@@ -273,12 +273,12 @@ jobs:
           # If you're logging to a file, cat it here
           # cat logs/application.log || echo "No log file found"
 
-      - name: Stop ngrok
+      - name: Stop tunnel
         if: always()
         run: |
-          if [ ! -z "$NGROK_PID" ] && ps -p $NGROK_PID > /dev/null; then
-            echo "Stopping ngrok tunnel..."
-            kill $NGROK_PID 2>/dev/null || true
+          if [ ! -z "$TUNNEL_PID" ] && ps -p $TUNNEL_PID > /dev/null 2>&1; then
+            echo "Stopping tunnel..."
+            kill $TUNNEL_PID 2>/dev/null || true
           fi
 
       - name: Stop application
@@ -305,5 +305,6 @@ jobs:
           path: |
             logs/
             *.log
+            tunnel.log
           retention-days: 7
 
