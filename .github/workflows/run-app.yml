@@ -29,6 +29,16 @@ jobs:
           --health-timeout 5s
           --health-retries 5
 
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -46,10 +56,28 @@ jobs:
       - name: Start Spring Boot Application
         run: |
           echo "Starting Spring Boot application..."
-          java -jar target/*.jar &
+          echo "Logs will be written to app.log"
+
+          # Start the application and redirect output to app.log
+          nohup java -jar target/*.jar > app.log 2>&1 &
           APP_PID=$!
           echo "APP_PID=$APP_PID" >> $GITHUB_ENV
           echo "Application started with PID: $APP_PID"
+
+          # Wait a moment for the log file to be created
+          sleep 3
+
+          # Show initial logs
+          echo ""
+          echo "=========================================="
+          echo "📋 Initial Application Output:"
+          echo "=========================================="
+          if [ -f app.log ]; then
+            head -n 20 app.log
+          else
+            echo "⚠️  Log file not created yet"
+          fi
+          echo "=========================================="
         env:
           SPRING_DATASOURCE_URL: jdbc:postgresql://localhost:5432/postgres
           SPRING_DATASOURCE_USERNAME: postgres
@@ -59,7 +87,31 @@ jobs:
         run: |
           echo "Waiting for application to be ready..."
           echo ""
+
+          # Check if app process is running
+          if ! ps -p $APP_PID > /dev/null; then
+            echo "❌ ERROR: Application process died immediately!"
+            echo ""
+            echo "Application logs:"
+            cat app.log 2>/dev/null || echo "No log file found"
+            exit 1
+          fi
+
           for i in {1..30}; do
+            # Check if process is still alive
+            if ! ps -p $APP_PID > /dev/null; then
+              echo ""
+              echo "❌ ERROR: Application process died during startup!"
+              echo ""
+              echo "=========================================="
+              echo "📋 FULL APPLICATION LOG:"
+              echo "=========================================="
+              cat app.log 2>/dev/null || echo "No log file found"
+              echo "=========================================="
+              exit 1
+            fi
+
+            # Try to connect to the application
             if curl -f http://localhost:8080/actuator/health 2>/dev/null || curl -f http://localhost:8080 2>/dev/null; then
               echo ""
               echo "Application is ready!"
@@ -67,17 +119,46 @@ jobs:
               echo "=========================================="
               echo "📋 STARTUP LOGS (Last 50 lines):"
               echo "=========================================="
-              tail -n 50 app.log
+              tail -n 50 app.log 2>/dev/null || echo "No log file found"
               echo "=========================================="
               break
             fi
-            echo "Attempt $i: Application not ready yet, waiting..."
-            if [ $i -eq 15 ] || [ $i -eq 30 ]; then
+
+            echo "Attempt $i/30: Application not ready yet, waiting..."
+
+            # Show logs at intervals
+            if [ $i -eq 10 ] || [ $i -eq 20 ]; then
               echo ""
-              echo "Current application logs:"
-              tail -n 20 app.log
+              echo "=========================================="
+              echo "📋 Current application logs (last 30 lines):"
+              echo "=========================================="
+              if [ -f app.log ]; then
+                tail -n 30 app.log
+              else
+                echo "⚠️  Log file 'app.log' not found yet"
+                echo "Checking if process is writing to stdout..."
+                ps -p $APP_PID -o pid,command
+              fi
+              echo "=========================================="
               echo ""
             fi
+
+            # On last attempt, show full logs
+            if [ $i -eq 30 ]; then
+              echo ""
+              echo "❌ ERROR: Application failed to start after 150 seconds"
+              echo ""
+              echo "=========================================="
+              echo "📋 FULL APPLICATION LOG:"
+              echo "=========================================="
+              cat app.log 2>/dev/null || echo "No log file found"
+              echo "=========================================="
+              echo ""
+              echo "Process status:"
+              ps -p $APP_PID -o pid,ppid,stat,command || echo "Process not found"
+              exit 1
+            fi
+
             sleep 5
           done
 
