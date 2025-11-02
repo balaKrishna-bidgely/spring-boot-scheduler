@@ -72,55 +72,79 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y jq
 
-      - name: Setup ngrok
+      - name: Setup tunnel service
         run: |
-          echo "Installing ngrok..."
-          curl -s https://ngrok-agent.s3.amazonaws.com/ngrok.asc | sudo tee /etc/apt/trusted.gpg.d/ngrok.asc >/dev/null
-          echo "deb https://ngrok-agent.s3.amazonaws.com buster main" | sudo tee /etc/apt/sources.list.d/ngrok.list
-          sudo apt update && sudo apt install ngrok
-
-          # Configure ngrok with auth token (if provided)
           if [ ! -z "${{ secrets.NGROK_AUTH_TOKEN }}" ]; then
+            echo "Using ngrok (authenticated)..."
+            curl -s https://ngrok-agent.s3.amazonaws.com/ngrok.asc | sudo tee /etc/apt/trusted.gpg.d/ngrok.asc >/dev/null
+            echo "deb https://ngrok-agent.s3.amazonaws.com buster main" | sudo tee /etc/apt/sources.list.d/ngrok.list
+            sudo apt update && sudo apt install ngrok
             ngrok config add-authtoken ${{ secrets.NGROK_AUTH_TOKEN }}
+            echo "TUNNEL_TYPE=ngrok" >> $GITHUB_ENV
+          else
+            echo "Using localhost.run (no auth required)..."
+            echo "TUNNEL_TYPE=localhost.run" >> $GITHUB_ENV
           fi
 
-      - name: Start ngrok tunnel
+      - name: Start tunnel
         run: |
-          echo "Starting ngrok tunnel..."
-          ngrok http 8080 --log=stdout > ngrok.log &
-          NGROK_PID=$!
-          echo "NGROK_PID=$NGROK_PID" >> $GITHUB_ENV
+          if [ "$TUNNEL_TYPE" = "ngrok" ]; then
+            echo "Starting ngrok tunnel..."
+            ngrok http 8080 --log=stdout > tunnel.log &
+            TUNNEL_PID=$!
+            echo "TUNNEL_PID=$TUNNEL_PID" >> $GITHUB_ENV
+            sleep 5
+            TUNNEL_URL=$(curl -s http://localhost:4040/api/tunnels | jq -r '.tunnels[0].public_url')
+          else
+            echo "Starting localhost.run tunnel..."
+            # Use localhost.run (SSH-based tunnel, no signup needed)
+            ssh -o StrictHostKeyChecking=no -o ServerAliveInterval=60 -R 80:localhost:8080 nokey@localhost.run > tunnel.log 2>&1 &
+            TUNNEL_PID=$!
+            echo "TUNNEL_PID=$TUNNEL_PID" >> $GITHUB_ENV
 
-          # Wait for ngrok to start
-          sleep 5
+            # Wait for tunnel to establish and extract URL
+            sleep 10
+            TUNNEL_URL=$(grep -oP 'https://[a-z0-9-]+\.lhr\.life' tunnel.log | head -1)
 
-          # Get the public URL
-          NGROK_URL=$(curl -s http://localhost:4040/api/tunnels | jq -r '.tunnels[0].public_url')
-          echo "NGROK_URL=$NGROK_URL" >> $GITHUB_ENV
-          echo "ngrok_url=$NGROK_URL" >> $GITHUB_OUTPUT
-        id: ngrok
+            # If localhost.run URL not found, try alternative format
+            if [ -z "$TUNNEL_URL" ]; then
+              TUNNEL_URL=$(grep -oP 'tunneled.*https://\K[^\s]+' tunnel.log | head -1)
+            fi
+
+            # Fallback: show what we got
+            if [ -z "$TUNNEL_URL" ]; then
+              echo "Could not extract URL automatically. Tunnel log:"
+              cat tunnel.log
+              TUNNEL_URL="Check logs for URL"
+            fi
+          fi
+
+          echo "TUNNEL_URL=$TUNNEL_URL" >> $GITHUB_ENV
+          echo "tunnel_url=$TUNNEL_URL" >> $GITHUB_OUTPUT
+          echo "Public URL: $TUNNEL_URL"
+        id: tunnel
 
       - name: Display application info
         run: |
           echo "==================================="
           echo "🚀 Application is running!"
           echo "==================================="
-          echo "Public URL: ${{ env.NGROK_URL }}"
+          echo "Public URL: ${{ env.TUNNEL_URL }}"
           echo "Duration: ${{ github.event.inputs.duration_minutes || '60' }} minutes"
           echo "Started at: $(date)"
           echo "Will stop at: $(date -d '+${{ github.event.inputs.duration_minutes || '60' }} minutes')"
           echo "==================================="
           echo ""
           echo "📡 API Endpoints:"
-          echo "  - Health: ${{ env.NGROK_URL }}/actuator/health"
-          echo "  - Rates: ${{ env.NGROK_URL }}/api/rates"
-          echo "  - Notifications: ${{ env.NGROK_URL }}/api/notifications"
-          echo "  - Templates: ${{ env.NGROK_URL }}/api/templates"
+          echo "  - Health: ${{ env.TUNNEL_URL }}/actuator/health"
+          echo "  - Rates: ${{ env.TUNNEL_URL }}/api/rates"
+          echo "  - Notifications: ${{ env.TUNNEL_URL }}/api/notifications"
+          echo "  - Templates: ${{ env.TUNNEL_URL }}/api/templates"
           echo "==================================="
           echo ""
           echo "💡 Example API Requests:"
-          echo "  curl ${{ env.NGROK_URL }}/api/rates"
-          echo "  curl ${{ env.NGROK_URL }}/api/rates/EUR"
+          echo "  curl ${{ env.TUNNEL_URL }}/api/rates"
+          echo "  curl ${{ env.TUNNEL_URL }}/api/rates/EUR"
           echo "==================================="
 
       - name: Create GitHub Summary
@@ -131,41 +155,42 @@ jobs:
           ## 🌐 Public URL
           **Your application is accessible at:**
           \`\`\`
-          ${{ env.NGROK_URL }}
+          ${{ env.TUNNEL_URL }}
           \`\`\`
 
           ## ⏱️ Runtime Information
           - **Duration:** ${{ github.event.inputs.duration_minutes || '60' }} minutes
           - **Started at:** $(date)
           - **Will stop at:** $(date -d '+${{ github.event.inputs.duration_minutes || '60' }} minutes')
+          - **Tunnel Type:** ${{ env.TUNNEL_TYPE }}
 
           ## 📡 Available API Endpoints
 
           | Endpoint | URL |
           |----------|-----|
-          | Health Check | [\`GET ${{ env.NGROK_URL }}/actuator/health\`](${{ env.NGROK_URL }}/actuator/health) |
-          | Get All Rates | [\`GET ${{ env.NGROK_URL }}/api/rates\`](${{ env.NGROK_URL }}/api/rates) |
-          | Get Rate by Currency | [\`GET ${{ env.NGROK_URL }}/api/rates/{currency}\`](${{ env.NGROK_URL }}/api/rates/EUR) |
-          | Create Notification | [\`POST ${{ env.NGROK_URL }}/api/notifications\`](${{ env.NGROK_URL }}/api/notifications) |
-          | Get Notification | [\`GET ${{ env.NGROK_URL }}/api/notifications/{id}\`](${{ env.NGROK_URL }}/api/notifications/1) |
-          | List Notifications | [\`GET ${{ env.NGROK_URL }}/api/notifications\`](${{ env.NGROK_URL }}/api/notifications) |
-          | Get All Templates | [\`GET ${{ env.NGROK_URL }}/api/templates\`](${{ env.NGROK_URL }}/api/templates) |
+          | Health Check | [\`GET ${{ env.TUNNEL_URL }}/actuator/health\`](${{ env.TUNNEL_URL }}/actuator/health) |
+          | Get All Rates | [\`GET ${{ env.TUNNEL_URL }}/api/rates\`](${{ env.TUNNEL_URL }}/api/rates) |
+          | Get Rate by Currency | [\`GET ${{ env.TUNNEL_URL }}/api/rates/{currency}\`](${{ env.TUNNEL_URL }}/api/rates/EUR) |
+          | Create Notification | [\`POST ${{ env.TUNNEL_URL }}/api/notifications\`](${{ env.TUNNEL_URL }}/api/notifications) |
+          | Get Notification | [\`GET ${{ env.TUNNEL_URL }}/api/notifications/{id}\`](${{ env.TUNNEL_URL }}/api/notifications/1) |
+          | List Notifications | [\`GET ${{ env.TUNNEL_URL }}/api/notifications\`](${{ env.TUNNEL_URL }}/api/notifications) |
+          | Get All Templates | [\`GET ${{ env.TUNNEL_URL }}/api/templates\`](${{ env.TUNNEL_URL }}/api/templates) |
 
           ## 💡 Example cURL Commands
 
           ### Get Exchange Rates
           \`\`\`bash
-          curl ${{ env.NGROK_URL }}/api/rates
+          curl ${{ env.TUNNEL_URL }}/api/rates
           \`\`\`
 
           ### Get Specific Currency Rate
           \`\`\`bash
-          curl ${{ env.NGROK_URL }}/api/rates/EUR
+          curl ${{ env.TUNNEL_URL }}/api/rates/EUR
           \`\`\`
 
           ### Create a Notification Job
           \`\`\`bash
-          curl -X POST ${{ env.NGROK_URL }}/api/notifications \\
+          curl -X POST ${{ env.TUNNEL_URL }}/api/notifications \\
             -H "Content-Type: application/json" \\
             -d '{
               "userId": 1,
@@ -181,12 +206,12 @@ jobs:
 
           ### List All Notifications
           \`\`\`bash
-          curl ${{ env.NGROK_URL }}/api/notifications
+          curl ${{ env.TUNNEL_URL }}/api/notifications
           \`\`\`
 
           ### Get Templates
           \`\`\`bash
-          curl ${{ env.NGROK_URL }}/api/templates
+          curl ${{ env.TUNNEL_URL }}/api/templates
           \`\`\`
 
           ---
@@ -200,7 +225,7 @@ jobs:
           DURATION_SECONDS=$((DURATION_MINUTES * 60))
           echo "Running application for $DURATION_MINUTES minutes ($DURATION_SECONDS seconds)..."
           echo ""
-          echo "🌐 Your application is now accessible at: ${{ env.NGROK_URL }}"
+          echo "🌐 Your application is now accessible at: ${{ env.TUNNEL_URL }}"
           echo "📊 Monitor requests in real-time in the logs below"
           echo ""
 
@@ -210,7 +235,7 @@ jobs:
             REMAINING=$((END_TIME - $(date +%s)))
             REMAINING_MINUTES=$((REMAINING / 60))
             REMAINING_SECONDS=$((REMAINING % 60))
-            echo "⏱️  Application running... Time remaining: ${REMAINING_MINUTES}m ${REMAINING_SECONDS}s | Public URL: ${{ env.NGROK_URL }}"
+            echo "⏱️  Application running... Time remaining: ${REMAINING_MINUTES}m ${REMAINING_SECONDS}s | Public URL: ${{ env.TUNNEL_URL }}"
 
             # Check if app is still alive
             if ! ps -p $APP_PID > /dev/null; then
@@ -218,12 +243,19 @@ jobs:
               exit 1
             fi
 
-            # Check if ngrok is still alive
-            if ! ps -p $NGROK_PID > /dev/null; then
-              echo "⚠️  WARNING: ngrok tunnel died! Restarting..."
-              ngrok http 8080 --log=stdout > ngrok.log &
-              NGROK_PID=$!
-              sleep 3
+            # Check if tunnel is still alive
+            if ! ps -p $TUNNEL_PID > /dev/null 2>&1; then
+              echo "⚠️  WARNING: Tunnel died! Attempting to restart..."
+              if [ "$TUNNEL_TYPE" = "ngrok" ]; then
+                ngrok http 8080 --log=stdout > tunnel.log &
+                TUNNEL_PID=$!
+                sleep 3
+              else
+                ssh -o StrictHostKeyChecking=no -o ServerAliveInterval=60 -R 80:localhost:8080 nokey@localhost.run > tunnel.log 2>&1 &
+                TUNNEL_PID=$!
+                sleep 5
+              fi
+              echo "TUNNEL_PID=$TUNNEL_PID" >> $GITHUB_ENV
             fi
 
             # Sleep for 1 minute between status updates
