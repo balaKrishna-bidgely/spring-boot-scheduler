@@ -1,0 +1,277 @@
+name: Run Spring Boot Application
+
+on:
+  workflow_dispatch:  # Manual trigger
+    inputs:
+      duration_minutes:
+        description: 'Duration to run the app (in minutes)'
+        required: true
+        default: '60'
+  # schedule:
+  #   - cron: '0 */6 * * *'  # Optional: Run every 6 hours
+
+jobs:
+  run-application:
+    runs-on: ubuntu-latest
+    
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_DB: postgres
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: 1234
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+          cache: maven
+
+      - name: Build with Maven
+        run: mvn clean package -DskipTests
+
+      - name: Start Spring Boot Application
+        run: |
+          echo "Starting Spring Boot application..."
+          java -jar target/*.jar &
+          APP_PID=$!
+          echo "APP_PID=$APP_PID" >> $GITHUB_ENV
+          echo "Application started with PID: $APP_PID"
+        env:
+          SPRING_DATASOURCE_URL: jdbc:postgresql://localhost:5432/postgres
+          SPRING_DATASOURCE_USERNAME: postgres
+          SPRING_DATASOURCE_PASSWORD: 1234
+
+      - name: Wait for application to start
+        run: |
+          echo "Waiting for application to be ready..."
+          for i in {1..30}; do
+            if curl -f http://localhost:8080/actuator/health 2>/dev/null || curl -f http://localhost:8080 2>/dev/null; then
+              echo "Application is ready!"
+              break
+            fi
+            echo "Attempt $i: Application not ready yet, waiting..."
+            sleep 5
+          done
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y jq
+
+      - name: Setup ngrok
+        run: |
+          echo "Installing ngrok..."
+          curl -s https://ngrok-agent.s3.amazonaws.com/ngrok.asc | sudo tee /etc/apt/trusted.gpg.d/ngrok.asc >/dev/null
+          echo "deb https://ngrok-agent.s3.amazonaws.com buster main" | sudo tee /etc/apt/sources.list.d/ngrok.list
+          sudo apt update && sudo apt install ngrok
+
+          # Configure ngrok with auth token (if provided)
+          if [ ! -z "${{ secrets.NGROK_AUTH_TOKEN }}" ]; then
+            ngrok config add-authtoken ${{ secrets.NGROK_AUTH_TOKEN }}
+          fi
+
+      - name: Start ngrok tunnel
+        run: |
+          echo "Starting ngrok tunnel..."
+          ngrok http 8080 --log=stdout > ngrok.log &
+          NGROK_PID=$!
+          echo "NGROK_PID=$NGROK_PID" >> $GITHUB_ENV
+
+          # Wait for ngrok to start
+          sleep 5
+
+          # Get the public URL
+          NGROK_URL=$(curl -s http://localhost:4040/api/tunnels | jq -r '.tunnels[0].public_url')
+          echo "NGROK_URL=$NGROK_URL" >> $GITHUB_ENV
+          echo "ngrok_url=$NGROK_URL" >> $GITHUB_OUTPUT
+        id: ngrok
+
+      - name: Display application info
+        run: |
+          echo "==================================="
+          echo "🚀 Application is running!"
+          echo "==================================="
+          echo "Public URL: ${{ env.NGROK_URL }}"
+          echo "Duration: ${{ github.event.inputs.duration_minutes || '60' }} minutes"
+          echo "Started at: $(date)"
+          echo "Will stop at: $(date -d '+${{ github.event.inputs.duration_minutes || '60' }} minutes')"
+          echo "==================================="
+          echo ""
+          echo "📡 API Endpoints:"
+          echo "  - Health: ${{ env.NGROK_URL }}/actuator/health"
+          echo "  - Rates: ${{ env.NGROK_URL }}/api/rates"
+          echo "  - Notifications: ${{ env.NGROK_URL }}/api/notifications"
+          echo "  - Templates: ${{ env.NGROK_URL }}/api/templates"
+          echo "==================================="
+          echo ""
+          echo "💡 Example API Requests:"
+          echo "  curl ${{ env.NGROK_URL }}/api/rates"
+          echo "  curl ${{ env.NGROK_URL }}/api/rates/EUR"
+          echo "==================================="
+
+      - name: Create GitHub Summary
+        run: |
+          cat >> $GITHUB_STEP_SUMMARY << EOF
+          # 🚀 Application Running Successfully!
+
+          ## 🌐 Public URL
+          **Your application is accessible at:**
+          \`\`\`
+          ${{ env.NGROK_URL }}
+          \`\`\`
+
+          ## ⏱️ Runtime Information
+          - **Duration:** ${{ github.event.inputs.duration_minutes || '60' }} minutes
+          - **Started at:** $(date)
+          - **Will stop at:** $(date -d '+${{ github.event.inputs.duration_minutes || '60' }} minutes')
+
+          ## 📡 Available API Endpoints
+
+          | Endpoint | URL |
+          |----------|-----|
+          | Health Check | [\`GET ${{ env.NGROK_URL }}/actuator/health\`](${{ env.NGROK_URL }}/actuator/health) |
+          | Get All Rates | [\`GET ${{ env.NGROK_URL }}/api/rates\`](${{ env.NGROK_URL }}/api/rates) |
+          | Get Rate by Currency | [\`GET ${{ env.NGROK_URL }}/api/rates/{currency}\`](${{ env.NGROK_URL }}/api/rates/EUR) |
+          | Create Notification | [\`POST ${{ env.NGROK_URL }}/api/notifications\`](${{ env.NGROK_URL }}/api/notifications) |
+          | Get Notification | [\`GET ${{ env.NGROK_URL }}/api/notifications/{id}\`](${{ env.NGROK_URL }}/api/notifications/1) |
+          | List Notifications | [\`GET ${{ env.NGROK_URL }}/api/notifications\`](${{ env.NGROK_URL }}/api/notifications) |
+          | Get All Templates | [\`GET ${{ env.NGROK_URL }}/api/templates\`](${{ env.NGROK_URL }}/api/templates) |
+
+          ## 💡 Example cURL Commands
+
+          ### Get Exchange Rates
+          \`\`\`bash
+          curl ${{ env.NGROK_URL }}/api/rates
+          \`\`\`
+
+          ### Get Specific Currency Rate
+          \`\`\`bash
+          curl ${{ env.NGROK_URL }}/api/rates/EUR
+          \`\`\`
+
+          ### Create a Notification Job
+          \`\`\`bash
+          curl -X POST ${{ env.NGROK_URL }}/api/notifications \\
+            -H "Content-Type: application/json" \\
+            -d '{
+              "userId": 1,
+              "type": "EMAIL",
+              "templateKey": "welcome",
+              "sendAt": "$(date -u -d '+5 minutes' +%Y-%m-%dT%H:%M:%S)",
+              "data": {
+                "userName": "John Doe",
+                "orderId": "12345"
+              }
+            }'
+          \`\`\`
+
+          ### List All Notifications
+          \`\`\`bash
+          curl ${{ env.NGROK_URL }}/api/notifications
+          \`\`\`
+
+          ### Get Templates
+          \`\`\`bash
+          curl ${{ env.NGROK_URL }}/api/templates
+          \`\`\`
+
+          ---
+
+          **Note:** The application will automatically stop after ${{ github.event.inputs.duration_minutes || '60' }} minutes.
+          EOF
+
+      - name: Run application for specified duration
+        run: |
+          DURATION_MINUTES=${{ github.event.inputs.duration_minutes || '60' }}
+          DURATION_SECONDS=$((DURATION_MINUTES * 60))
+          echo "Running application for $DURATION_MINUTES minutes ($DURATION_SECONDS seconds)..."
+          echo ""
+          echo "🌐 Your application is now accessible at: ${{ env.NGROK_URL }}"
+          echo "📊 Monitor requests in real-time in the logs below"
+          echo ""
+
+          # Monitor the application while it runs
+          END_TIME=$(($(date +%s) + DURATION_SECONDS))
+          while [ $(date +%s) -lt $END_TIME ]; do
+            REMAINING=$((END_TIME - $(date +%s)))
+            REMAINING_MINUTES=$((REMAINING / 60))
+            REMAINING_SECONDS=$((REMAINING % 60))
+            echo "⏱️  Application running... Time remaining: ${REMAINING_MINUTES}m ${REMAINING_SECONDS}s | Public URL: ${{ env.NGROK_URL }}"
+
+            # Check if app is still alive
+            if ! ps -p $APP_PID > /dev/null; then
+              echo "❌ ERROR: Application process died!"
+              exit 1
+            fi
+
+            # Check if ngrok is still alive
+            if ! ps -p $NGROK_PID > /dev/null; then
+              echo "⚠️  WARNING: ngrok tunnel died! Restarting..."
+              ngrok http 8080 --log=stdout > ngrok.log &
+              NGROK_PID=$!
+              sleep 3
+            fi
+
+            # Sleep for 1 minute between status updates
+            sleep 60
+          done
+
+          echo "✅ Duration completed!"
+
+      - name: Fetch application logs
+        if: always()
+        run: |
+          echo "==================================="
+          echo "Application Logs:"
+          echo "==================================="
+          # If you're logging to a file, cat it here
+          # cat logs/application.log || echo "No log file found"
+
+      - name: Stop ngrok
+        if: always()
+        run: |
+          if [ ! -z "$NGROK_PID" ] && ps -p $NGROK_PID > /dev/null; then
+            echo "Stopping ngrok tunnel..."
+            kill $NGROK_PID 2>/dev/null || true
+          fi
+
+      - name: Stop application
+        if: always()
+        run: |
+          if [ ! -z "$APP_PID" ] && ps -p $APP_PID > /dev/null; then
+            echo "Stopping application (PID: $APP_PID)..."
+            kill $APP_PID
+            sleep 5
+            # Force kill if still running
+            if ps -p $APP_PID > /dev/null; then
+              kill -9 $APP_PID
+            fi
+            echo "Application stopped."
+          else
+            echo "Application already stopped."
+          fi
+
+      - name: Upload logs as artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: application-logs
+          path: |
+            logs/
+            *.log
+          retention-days: 7
+
