@@ -447,14 +447,3 @@ jobs:
             echo "Application already stopped."
           fi
 
-      - name: Upload logs as artifact
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: application-logs
-          path: |
-            logs/
-            *.log
-            tunnel.log
-          retention-days: 7
-
