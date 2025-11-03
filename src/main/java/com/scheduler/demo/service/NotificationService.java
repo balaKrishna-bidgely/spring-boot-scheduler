@@ -19,14 +19,17 @@ public class NotificationService {
     private final NotificationJobRepository jobRepo;
     private final TemplateService templateService;
     private final NotificationSender sender;
+    private final SqsNotificationService sqsService;
     private final ObjectMapper mapper = new ObjectMapper();
 
     public NotificationService(NotificationJobRepository jobRepo,
                                TemplateService templateService,
-                               NotificationSender sender) {
+                               NotificationSender sender,
+                               SqsNotificationService sqsService) {
         this.jobRepo = jobRepo;
         this.templateService = templateService;
         this.sender = sender;
+        this.sqsService = sqsService;
     }
 
     @Transactional
@@ -36,7 +39,14 @@ public class NotificationService {
         job.setType(req.getType());
         job.setTemplateKey(req.getTemplateKey());
         job.setSendAt(req.getSendAt());
-        job.setStatus("PENDING");
+
+        // Set initial status based on whether SQS is enabled
+        if (sqsService.isSqsEnabled()) {
+            job.setStatus("QUEUED");  // Will be sent to SQS
+        } else {
+            job.setStatus("PENDING"); // Will be picked up by scheduler
+        }
+
         job.setRecipientEmail(req.getRecipientEmail());
         job.setUserName(req.getUserName());
         try {
@@ -46,7 +56,23 @@ public class NotificationService {
         }
         job.setCreatedAt(LocalDateTime.now());
         job.setUpdatedAt(LocalDateTime.now());
-        return jobRepo.save(job);
+
+        // Save to database first
+        job = jobRepo.save(job);
+
+        // If SQS is enabled, send to queue
+        if (sqsService.isSqsEnabled()) {
+            boolean sent = sqsService.sendToQueue(job);
+            if (!sent) {
+                log.warn("⚠️  Failed to send job {} to SQS. Will be picked up by scheduler.", job.getId());
+                job.setStatus("PENDING"); // Fallback to polling
+                job = jobRepo.save(job);
+            } else {
+                log.info("✅ Job {} sent to SQS successfully", job.getId());
+            }
+        }
+
+        return job;
     }
 
     public Optional<NotificationJob> findById(Long id) {
@@ -67,16 +93,13 @@ public class NotificationService {
         return false;
     }
 
-    @Transactional
     public void processJob(NotificationJob job) {
         log.info("📧 Processing job ID={}, type={}, template={}", job.getId(), job.getType(), job.getTemplateKey());
 
-        // Set to SENDING
-        job.setStatus("SENDING");
-        job.setUpdatedAt(LocalDateTime.now());
-        jobRepo.save(job);
+        // Step 1: Update status to SENDING (short transaction)
+        updateJobStatus(job.getId(), "SENDING");
 
-        // load template
+        // Step 2: Load template and prepare content (no DB connection needed)
         Optional<String> t = templateService.getTemplateContent(job.getTemplateKey());
         String content = t.orElse("Hi, this is notification for template " + job.getTemplateKey());
         log.debug("Template content: {}", content);
@@ -93,6 +116,7 @@ public class NotificationService {
         String finalContent = render(content, payloadMap);
         log.debug("Final content after rendering: {}", finalContent);
 
+        // Step 3: Send notification (no DB connection needed - can take 2+ seconds)
         boolean success = false;
         try {
             success = switch (job.getType().toUpperCase(Locale.ROOT)) {
@@ -107,10 +131,21 @@ public class NotificationService {
             success = false;
         }
 
-        job.setStatus(success ? "COMPLETED" : "FAILED");
-        job.setUpdatedAt(LocalDateTime.now());
-        jobRepo.save(job);
-        log.info("Job ID={} marked as {}", job.getId(), job.getStatus());
+        // Step 4: Update final status (short transaction)
+        String finalStatus = success ? "COMPLETED" : "FAILED";
+        updateJobStatus(job.getId(), finalStatus);
+        log.info("Job ID={} marked as {}", job.getId(), finalStatus);
+    }
+
+    @Transactional
+    private void updateJobStatus(Long jobId, String status) {
+        Optional<NotificationJob> opt = jobRepo.findById(jobId);
+        if (opt.isPresent()) {
+            NotificationJob job = opt.get();
+            job.setStatus(status);
+            job.setUpdatedAt(LocalDateTime.now());
+            jobRepo.save(job);
+        }
     }
 
     private String render(String template, Map<String, Object> data) {

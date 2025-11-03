@@ -4,6 +4,13 @@ spring:
     username: postgres
     password: 1234
     driver-class-name: org.postgresql.Driver
+    hikari:
+      maximum-pool-size: 30        # Increase from default 10 to 30
+      minimum-idle: 10             # Keep 10 connections ready
+      connection-timeout: 60000    # Wait up to 60 seconds for a connection
+      idle-timeout: 300000         # Keep idle connections for 5 minutes
+      max-lifetime: 1800000        # Recycle connections after 30 minutes
+      leak-detection-threshold: 60000  # Warn if connection held > 60 seconds
   jpa:
     hibernate:
       ddl-auto: create #update
@@ -35,11 +42,36 @@ spring:
 server:
   port: 8080
 
+# AWS Configuration
+aws:
+  region: us-west-2 # Change to your AWS region
+  # Optional: Provide credentials explicitly (not recommended for production)
+  # Better to use IAM roles, environment variables, or AWS credentials file
+  accessKeyId: ${AWS_ACCESS_KEY_ID:}
+  secretAccessKey: ${AWS_SECRET_ACCESS_KEY:}
+
+  sqs:
+    enabled: true                     # Set to true to enable SQS mode
+    queue:
+      notification: S3RawDataArchiveEvent-nonprodqa # Main queue name
+      notification-dlq: AggregationReadyUsersDLQ-nonprodqa # Dead Letter Queue name
+
 app:
   scheduler:
-    poll-interval-seconds: 60
+    sqs-poll-interval-seconds: 10  # Poll SQS every 10 seconds (when SQS enabled)
+    sqs-max-messages: 10           # Fetch up to 10 messages per poll
   threadpool:
     core: 10
     max: 30
     queue-capacity: 100
+  email:
+    rate-limit:
+      enabled: true              # Enable rate limiting to avoid Gmail blocking
+      delay-ms: 2000             # Wait 2 seconds between each email (30 emails/min max)
+      max-concurrent: 3          # Send max 3 emails at the same time
+      timeout-seconds: 300       # Wait up to 5 minutes for a sending slot (for large batches)
+    retry:
+      enabled: true              # Enable retry for temporary failures
+      max-attempts: 3            # Retry up to 3 times
+      delay-ms: 5000             # Wait 5 seconds between retries
 
