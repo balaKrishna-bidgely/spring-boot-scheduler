@@ -211,8 +211,11 @@ jobs:
             ngrok config add-authtoken ${{ secrets.NGROK_AUTH_TOKEN }}
             echo "TUNNEL_TYPE=ngrok" >> $GITHUB_ENV
           else
-            echo "Using localhost.run (no auth required)..."
-            echo "TUNNEL_TYPE=localhost.run" >> $GITHUB_ENV
+            echo "Using Cloudflare Tunnel (cloudflared) - no auth required..."
+            # Download and install cloudflared
+            wget -q https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb
+            sudo dpkg -i cloudflared-linux-amd64.deb
+            echo "TUNNEL_TYPE=cloudflared" >> $GITHUB_ENV
           fi
 
       - name: Start tunnel
@@ -247,35 +250,46 @@ jobs:
             fi
 
           else
-            echo "Starting localhost.run tunnel..."
-            # Use localhost.run (SSH-based tunnel, no signup needed)
-            ssh -o StrictHostKeyChecking=no -o ServerAliveInterval=60 -R 80:localhost:8080 nokey@localhost.run > tunnel.log 2>&1 &
+            echo "Starting Cloudflare Tunnel (cloudflared)..."
+            # Start cloudflared tunnel
+            cloudflared tunnel --url http://localhost:8080 --no-autoupdate > tunnel.log 2>&1 &
             TUNNEL_PID=$!
             echo "TUNNEL_PID=$TUNNEL_PID" >> $GITHUB_ENV
 
-            echo "Waiting for localhost.run tunnel to establish..."
-            sleep 15
+            echo "Waiting for cloudflared tunnel to establish..."
+            sleep 10
 
             echo "Tunnel log contents:"
             cat tunnel.log
             echo ""
 
-            # Try multiple patterns to extract URL
-            TUNNEL_URL=$(grep -oE 'https://[a-zA-Z0-9-]+\.lhr\.life' tunnel.log | head -1)
+            # Extract URL from cloudflared output
+            # Look for patterns like: https://random-words-1234.trycloudflare.com
+            TUNNEL_URL=$(grep -oE 'https://[a-zA-Z0-9-]+\.trycloudflare\.com' tunnel.log | head -1)
 
+            # Alternative pattern
             if [ -z "$TUNNEL_URL" ]; then
-              TUNNEL_URL=$(grep -oE 'https://[a-zA-Z0-9-]+\.localhost\.run' tunnel.log | head -1)
+              TUNNEL_URL=$(grep -oE 'https://[^[:space:]]+\.trycloudflare\.com' tunnel.log | head -1)
             fi
 
+            # Check if tunnel is actually running
             if [ -z "$TUNNEL_URL" ]; then
-              TUNNEL_URL=$(grep -oE 'Connect to https://[^\s]+' tunnel.log | sed 's/Connect to //' | head -1)
+              echo "⚠️  Could not extract URL from cloudflared output."
+              echo "Checking if process is still running..."
+              if ps -p $TUNNEL_PID > /dev/null; then
+                echo "Process is running, waiting a bit more..."
+                sleep 5
+                cat tunnel.log
+                TUNNEL_URL=$(grep -oE 'https://[a-zA-Z0-9-]+\.trycloudflare\.com' tunnel.log | head -1)
+              else
+                echo "❌ Tunnel process died!"
+                echo "Full tunnel log:"
+                cat tunnel.log
+                TUNNEL_URL="ERROR: Cloudflare tunnel failed to start"
+              fi
             fi
 
-            if [ -z "$TUNNEL_URL" ]; then
-              TUNNEL_URL=$(grep -oE 'http[s]?://[a-zA-Z0-9.-]+' tunnel.log | grep -v 'localhost' | head -1)
-            fi
-
-            # Fallback: show what we got
+            # Final fallback
             if [ -z "$TUNNEL_URL" ]; then
               echo "⚠️  Could not extract URL automatically."
               echo "Please check the tunnel log above for the URL."
@@ -289,6 +303,18 @@ jobs:
           echo "=========================================="
           echo "🌐 PUBLIC URL: $TUNNEL_URL"
           echo "=========================================="
+
+          # Verify tunnel is working
+          if [[ "$TUNNEL_URL" != ERROR* ]]; then
+            echo ""
+            echo "🧪 Testing tunnel connectivity..."
+            sleep 3
+            if curl -f -s -o /dev/null -w "%{http_code}" "$TUNNEL_URL/actuator/health" | grep -q "200\|404"; then
+              echo "✅ Tunnel is working!"
+            else
+              echo "⚠️  Tunnel URL may not be accessible yet. Give it a moment..."
+            fi
+          fi
         id: tunnel
 
       - name: Display application info
@@ -459,13 +485,25 @@ jobs:
             if ! ps -p $TUNNEL_PID > /dev/null 2>&1; then
               echo "⚠️  WARNING: Tunnel died! Attempting to restart..."
               if [ "$TUNNEL_TYPE" = "ngrok" ]; then
-                ngrok http 8080 --log=stdout > tunnel.log &
-                TUNNEL_PID=$!
-                sleep 3
-              else
-                ssh -o StrictHostKeyChecking=no -o ServerAliveInterval=60 -R 80:localhost:8080 nokey@localhost.run > tunnel.log 2>&1 &
+                ngrok http 8080 --log=stdout > tunnel.log 2>&1 &
                 TUNNEL_PID=$!
                 sleep 5
+                # Get new URL
+                NEW_URL=$(curl -s http://localhost:4040/api/tunnels | jq -r '.tunnels[0].public_url' 2>/dev/null)
+                if [ ! -z "$NEW_URL" ] && [ "$NEW_URL" != "null" ]; then
+                  echo "TUNNEL_URL=$NEW_URL" >> $GITHUB_ENV
+                  echo "✅ Tunnel restarted: $NEW_URL"
+                fi
+              else
+                cloudflared tunnel --url http://localhost:8080 --no-autoupdate > tunnel.log 2>&1 &
+                TUNNEL_PID=$!
+                sleep 8
+                # Get new URL
+                NEW_URL=$(grep -oE 'https://[a-zA-Z0-9-]+\.trycloudflare\.com' tunnel.log | head -1)
+                if [ ! -z "$NEW_URL" ]; then
+                  echo "TUNNEL_URL=$NEW_URL" >> $GITHUB_ENV
+                  echo "✅ Tunnel restarted: $NEW_URL"
+                fi
               fi
               echo "TUNNEL_PID=$TUNNEL_PID" >> $GITHUB_ENV
             fi
