@@ -30,8 +30,8 @@ spring:
   mail:
     host: smtp.gmail.com
     port: 587
-    username: balakrishnam@bidgely.com        # <-- replace with your Gmail
-    password: kgqz isvz ffnd nnfr     # <-- use app password (not normal)
+    username: ${SPRING_MAIL_USERNAME:}        # Set via environment variable or GitHub secret
+    password: ${SPRING_MAIL_PASSWORD:}        # Use Gmail App Password (not regular password)
     properties:
       mail:
         smtp:
