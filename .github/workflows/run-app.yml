@@ -185,11 +185,33 @@ jobs:
         run: |
           if [ "$TUNNEL_TYPE" = "ngrok" ]; then
             echo "Starting ngrok tunnel..."
-            ngrok http 8080 --log=stdout > tunnel.log &
+            ngrok http 8080 --log=stdout > tunnel.log 2>&1 &
             TUNNEL_PID=$!
             echo "TUNNEL_PID=$TUNNEL_PID" >> $GITHUB_ENV
-            sleep 5
-            TUNNEL_URL=$(curl -s http://localhost:4040/api/tunnels | jq -r '.tunnels[0].public_url')
+
+            echo "Waiting for ngrok to start..."
+            sleep 8
+
+            # Try to get URL from ngrok API
+            echo "Fetching tunnel URL from ngrok API..."
+            TUNNEL_URL=$(curl -s http://localhost:4040/api/tunnels | jq -r '.tunnels[0].public_url' 2>/dev/null)
+
+            # If that fails, try alternative method
+            if [ -z "$TUNNEL_URL" ] || [ "$TUNNEL_URL" = "null" ]; then
+              echo "Trying alternative method..."
+              TUNNEL_URL=$(curl -s http://localhost:4040/api/tunnels | jq -r '.tunnels[] | select(.proto=="https") | .public_url' 2>/dev/null | head -1)
+            fi
+
+            # Debug: show what ngrok API returns
+            if [ -z "$TUNNEL_URL" ] || [ "$TUNNEL_URL" = "null" ]; then
+              echo "⚠️  Could not get URL from ngrok API. Response:"
+              curl -s http://localhost:4040/api/tunnels | jq . || echo "API not responding"
+              echo ""
+              echo "Tunnel log:"
+              tail -20 tunnel.log
+              TUNNEL_URL="ERROR: ngrok tunnel failed to start"
+            fi
+
           else
             echo "Starting localhost.run tunnel..."
             # Use localhost.run (SSH-based tunnel, no signup needed)
@@ -197,26 +219,42 @@ jobs:
             TUNNEL_PID=$!
             echo "TUNNEL_PID=$TUNNEL_PID" >> $GITHUB_ENV
 
-            # Wait for tunnel to establish and extract URL
-            sleep 10
-            TUNNEL_URL=$(grep -oP 'https://[a-z0-9-]+\.lhr\.life' tunnel.log | head -1)
+            echo "Waiting for localhost.run tunnel to establish..."
+            sleep 15
 
-            # If localhost.run URL not found, try alternative format
+            echo "Tunnel log contents:"
+            cat tunnel.log
+            echo ""
+
+            # Try multiple patterns to extract URL
+            TUNNEL_URL=$(grep -oE 'https://[a-zA-Z0-9-]+\.lhr\.life' tunnel.log | head -1)
+
             if [ -z "$TUNNEL_URL" ]; then
-              TUNNEL_URL=$(grep -oP 'tunneled.*https://\K[^\s]+' tunnel.log | head -1)
+              TUNNEL_URL=$(grep -oE 'https://[a-zA-Z0-9-]+\.localhost\.run' tunnel.log | head -1)
+            fi
+
+            if [ -z "$TUNNEL_URL" ]; then
+              TUNNEL_URL=$(grep -oE 'Connect to https://[^\s]+' tunnel.log | sed 's/Connect to //' | head -1)
+            fi
+
+            if [ -z "$TUNNEL_URL" ]; then
+              TUNNEL_URL=$(grep -oE 'http[s]?://[a-zA-Z0-9.-]+' tunnel.log | grep -v 'localhost' | head -1)
             fi
 
             # Fallback: show what we got
             if [ -z "$TUNNEL_URL" ]; then
-              echo "Could not extract URL automatically. Tunnel log:"
-              cat tunnel.log
-              TUNNEL_URL="Check logs for URL"
+              echo "⚠️  Could not extract URL automatically."
+              echo "Please check the tunnel log above for the URL."
+              TUNNEL_URL="ERROR: Could not extract URL - check logs above"
             fi
           fi
 
           echo "TUNNEL_URL=$TUNNEL_URL" >> $GITHUB_ENV
           echo "tunnel_url=$TUNNEL_URL" >> $GITHUB_OUTPUT
-          echo "Public URL: $TUNNEL_URL"
+          echo ""
+          echo "=========================================="
+          echo "🌐 PUBLIC URL: $TUNNEL_URL"
+          echo "=========================================="
         id: tunnel
 
       - name: Display application info
@@ -241,6 +279,41 @@ jobs:
           echo "  curl ${{ env.TUNNEL_URL }}/api/rates"
           echo "  curl ${{ env.TUNNEL_URL }}/api/rates/EUR"
           echo "==================================="
+
+          # Add to GitHub Actions Summary
+          echo "## 🚀 Application Running" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### 🌐 Public URL" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**${{ env.TUNNEL_URL }}**" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### 📡 API Endpoints" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "- Health: [${{ env.TUNNEL_URL }}/actuator/health](${{ env.TUNNEL_URL }}/actuator/health)" >> $GITHUB_STEP_SUMMARY
+          echo "- Rates: [${{ env.TUNNEL_URL }}/api/rates](${{ env.TUNNEL_URL }}/api/rates)" >> $GITHUB_STEP_SUMMARY
+          echo "- Notifications: [${{ env.TUNNEL_URL }}/api/notifications](${{ env.TUNNEL_URL }}/api/notifications)" >> $GITHUB_STEP_SUMMARY
+          echo "- Templates: [${{ env.TUNNEL_URL }}/api/templates](${{ env.TUNNEL_URL }}/api/templates)" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### ⏱️ Runtime" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "- Duration: ${{ github.event.inputs.duration_minutes || '60' }} minutes" >> $GITHUB_STEP_SUMMARY
+          echo "- Started: $(date)" >> $GITHUB_STEP_SUMMARY
+          echo "- Will stop: $(date -d '+${{ github.event.inputs.duration_minutes || '60' }} minutes')" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### 💡 Example cURL Commands" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo '```bash' >> $GITHUB_STEP_SUMMARY
+          echo "# Get exchange rates" >> $GITHUB_STEP_SUMMARY
+          echo "curl ${{ env.TUNNEL_URL }}/api/rates" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "# Get specific rate" >> $GITHUB_STEP_SUMMARY
+          echo "curl ${{ env.TUNNEL_URL }}/api/rates/EUR" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "# Create notification" >> $GITHUB_STEP_SUMMARY
+          echo 'curl -X POST ${{ env.TUNNEL_URL }}/api/notifications \' >> $GITHUB_STEP_SUMMARY
+          echo '  -H "Content-Type: application/json" \' >> $GITHUB_STEP_SUMMARY
+          echo '  -d '"'"'[{"userId":1,"type":"EMAIL","templateKey":"welcome","userName":"John","recipientEmail":"john@example.com","sendAt":"2025-11-03T12:00:00","data":{"message":"Hello!"}}]'"'"'' >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
 
       - name: Create GitHub Summary
         run: |
@@ -367,7 +440,12 @@ jobs:
             echo ""
             echo "=========================================="
             echo "⏱️  Time remaining: ${REMAINING_MINUTES}m ${REMAINING_SECONDS}s"
-            echo "🌐 Public URL: ${{ env.TUNNEL_URL }}"
+            echo ""
+            echo "🌐 PUBLIC URL (copy this):"
+            echo "   ${{ env.TUNNEL_URL }}"
+            echo ""
+            echo "📡 Quick test:"
+            echo "   curl ${{ env.TUNNEL_URL }}/actuator/health"
             echo "=========================================="
 
             # Show NEW log lines since last check
